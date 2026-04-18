@@ -1,0 +1,166 @@
+// This Pine Script screener identifies stocks in a parabolic exhaustion setup
+// per the Marios Stamatoudis Parabolic Short Strategy playbook.
+//
+// HOW TO USE IN TRADINGVIEW SCREENER
+// ───────────────────────────────────
+// 1. Open TradingView → Pine Editor → paste this script → Add to chart
+// 2. Open the Screener (top menu or tradingview.com/screener)
+// 3. Click "Filters" → "Add filter" → scroll to "Custom scripts" → pick this indicator
+// 4. Filter on:  "Score" >= 2  to find high-quality setups
+//               "Qualifies"   = 1 for any qualifying symbol
+//
+// WHAT IT SCORES (0–3 points)
+// ────────────────────────────
+//  +1  Filter 1 – Price moved ≥ threshold% from last 20MA base touch
+//  +1  Filter 2 – Move is aggressive (recent candle range > prior avg × multiplier)
+//  +1  Filter 3 – Price currently above 20MA (still in parabolic zone, not yet collapsed)
+//
+// BEST USED ON: Daily (D) chart
+// ─────────────────────────────────────────────────────────────────────────────
+
+//@version=5
+indicator("Parabolic Short Screener", shorttitle="PS·Screener", overlay=false, format=format.inherit)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+grp_thresh = "Move Thresholds"
+i_smallCapPct  = input.float(200.0, "Small-Cap threshold %",  minval=10, group=grp_thresh)
+i_midCapPct    = input.float(100.0, "Mid-Cap threshold %",    minval=10, group=grp_thresh)
+i_largeCapPct  = input.float(50.0,  "Large-Cap threshold %",  minval=5,  group=grp_thresh)
+
+grp_setup = "Setup Detection"
+i_maPeriod     = input.int(20,  "MA Period (base detection)",  minval=5, maxval=200, group=grp_setup)
+i_maLookback   = input.int(60,  "Max bars back for last touch",minval=20,maxval=252,  group=grp_setup)
+i_capOverride  = input.string("AUTO", "Market Cap Override",
+                   options=["AUTO","SMALL","MID","LARGE"],    group=grp_setup,
+                   tooltip="AUTO reads fundamental data. Override if data is unavailable.")
+
+grp_struct = "Structure Filter (Filter 2)"
+i_recentBars   = input.int(5,    "Recent candles (acceleration window)", minval=2,  group=grp_struct)
+i_priorBars    = input.int(15,   "Prior candles (baseline window)",       minval=5,  group=grp_struct)
+i_accelMult    = input.float(1.5,"Acceleration multiplier",   minval=1.0, step=0.1, group=grp_struct)
+
+grp_display = "Display"
+i_showTable    = input.bool(true, "Show info table", group=grp_display)
+
+// ─── Market Cap Classification ────────────────────────────────────────────────
+// Attempt to read fundamental market cap (available for most US stocks on TV)
+rawMktCap = request.financial(syminfo.tickerid, "MARKET_CAP", "FQ", ignore_invalid_symbol=true)
+mktCapB   = na(rawMktCap) ? 0.0 : rawMktCap / 1e9  // Convert to $B
+
+capFromFundamentals = mktCapB >= 10.0 ? "LARGE" :
+                      mktCapB >= 2.0  ? "MID"   : "SMALL"
+
+capCategory = switch i_capOverride
+    "SMALL" => "SMALL"
+    "MID"   => "MID"
+    "LARGE" => "LARGE"
+    => capFromFundamentals
+
+threshold   = capCategory == "LARGE" ? i_largeCapPct :
+              capCategory == "MID"   ? i_midCapPct   : i_smallCapPct
+
+// ─── Filter 1: Size of Move from Last 20MA Base Touch ────────────────────────
+// Playbook: "The move should always be measured from the most recent base —
+//            the last time price touched the 20-day moving average."
+
+ma20      = ta.sma(close, i_maPeriod)
+
+// How many completed bars ago did close sit at/below the 20MA?
+// We use close[1]/ma20[1] to operate on completed (confirmed) bars only.
+barsBack  = int(ta.barssince(close[1] <= ta.sma(close[1], i_maPeriod)))
+baseClose = (not na(barsBack) and barsBack < i_maLookback) ? close[barsBack + 1] : na
+
+movePct   = (not na(baseClose) and baseClose > 0) ?
+            (close - baseClose) / baseClose * 100.0 : 0.0
+
+filter1   = movePct >= threshold  // Size of move qualifies
+
+// ─── Filter 2: Aggressive Structure — Candle Range Acceleration ──────────────
+// Playbook: "The best setups happen when the move becomes aggressive.
+//            Price starts accelerating, candles become large."
+
+avgRange_recent = ta.sma(high - low, i_recentBars)
+avgRange_prior  = ta.sma(high[i_recentBars] - low[i_recentBars], i_priorBars)
+filter2   = not na(avgRange_prior) and avgRange_prior > 0 and
+            avgRange_recent >= i_accelMult * avgRange_prior
+
+// ─── Filter 3: Price Still Above 20MA (parabolic zone, not yet collapsed) ────
+filter3   = close > ma20
+
+// ─── Composite Score & Qualifying Signal ─────────────────────────────────────
+score     = (filter1 ? 1 : 0) + (filter2 ? 1 : 0) + (filter3 ? 1 : 0)
+qualifies = filter1  // Minimum: must clear the move threshold
+
+// ─── Plots (used by TradingView Screener for filtering) ──────────────────────
+plot(qualifies ? 1 : 0,  "Qualifies",    color=color.new(color.red, 100),  display=display.all)
+plot(score,              "Score",        color=color.new(color.blue, 100),  display=display.all)
+plot(movePct,            "Move %",       color=color.blue,  linewidth=2)
+plot(threshold,          "Threshold %",  color=color.gray,  linewidth=1, style=plot.style_line)
+
+// Highlight qualifying bars red
+bgcolor(qualifies and barstate.isconfirmed ? color.new(color.red, 88) : na,
+        title="Qualifies highlight")
+
+// ─── Info Table ───────────────────────────────────────────────────────────────
+var table tbl = table.new(position.top_right, 2, 8,
+    bgcolor       = color.new(color.black, 65),
+    border_color  = color.new(color.gray, 40),
+    border_width  = 1,
+    frame_color   = color.new(color.white, 60),
+    frame_width   = 1)
+
+f_cell(col, row, txt, tc) =>
+    table.cell(tbl, col, row, txt, text_color=tc,
+               text_size=size.small, bgcolor=color.new(color.black, 70))
+
+scoreColor = score == 3 ? color.lime :
+             score == 2 ? color.yellow :
+             score == 1 ? color.orange : color.gray
+
+if i_showTable and barstate.islast
+    f_cell(0, 0, "PARABOLIC SHORT SCREENER",  color.white)
+    f_cell(1, 0, syminfo.ticker,              color.yellow)
+
+    f_cell(0, 1, "Market Cap",                color.new(color.white, 30))
+    capStr = capCategory + (mktCapB > 0 ?
+             "  ($" + str.tostring(math.round(mktCapB, 1)) + "B)" : "  (n/a)")
+    f_cell(1, 1, capStr,                      color.white)
+
+    f_cell(0, 2, "Threshold",                 color.new(color.white, 30))
+    f_cell(1, 2, str.tostring(threshold, "#") + "%  (" + capCategory + "-cap)",  color.white)
+
+    f_cell(0, 3, "Move from Base",            color.new(color.white, 30))
+    moveColor = movePct >= threshold       ? color.lime   :
+                movePct >= threshold * 0.7 ? color.orange : color.red
+    f_cell(1, 3, str.tostring(math.round(movePct, 1)) + "%", moveColor)
+
+    f_cell(0, 4, "Filter 1 – Size",           color.new(color.white, 30))
+    f_cell(1, 4, filter1 ? "✓ PASS" : "✗ fail",
+           filter1 ? color.lime : color.red)
+
+    f_cell(0, 5, "Filter 2 – Accel",          color.new(color.white, 30))
+    f_cell(1, 5, filter2 ? "✓ PASS" : "✗ fail",
+           filter2 ? color.lime : color.orange)
+
+    f_cell(0, 6, "Filter 3 – Above MA",       color.new(color.white, 30))
+    f_cell(1, 6, filter3 ? "✓ PASS" : "✗ fail",
+           filter3 ? color.lime : color.gray)
+
+    f_cell(0, 7, "Score",                     color.new(color.white, 30))
+    f_cell(1, 7, str.tostring(score) + " / 3  " +
+           (score == 3 ? "★ PRIME" : score == 2 ? "WATCH" : score == 1 ? "weak" : "—"),
+           scoreColor)
+
+// ─── 20MA Line on Chart (when added as overlay to price pane) ─────────────────
+plot(ma20, "20 MA", color=color.new(color.orange, 0), linewidth=2, display=display.pane)
+
+// ─── Alerts ───────────────────────────────────────────────────────────────────
+alertcondition(qualifies and filter2 and barstate.isconfirmed,
+    title  = "Parabolic Setup — Score 2+",
+    message= "{{ticker}} | Parabolic Short Setup | Move: {{plot_2}}% | Cap: " +
+             capCategory + " | Score: {{plot_1}}/3")
+
+alertcondition(score == 3 and barstate.isconfirmed,
+    title  = "Parabolic Setup — PRIME (Score 3)",
+    message= "{{ticker}} | PRIME Parabolic Setup | Move: {{plot_2}}% | Cap: " +
+             capCategory + " | All 3 filters passed")

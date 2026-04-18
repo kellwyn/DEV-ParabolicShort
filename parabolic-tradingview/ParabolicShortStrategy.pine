@@ -1,0 +1,393 @@
+// Parabolic Short Strategy — Full Execution Script
+// Based on the Marios Stamatoudis playbook
+//
+// RECOMMENDED CHART:  H1 (1-hour) on a US stock
+//
+// SETUP FLOW
+// ──────────
+//  Step 1 — Screener (ParabolicShortScreener.pine on D1) identifies candidates
+//  Step 2 — Load this Strategy on the candidate's H1 chart
+//  Step 3 — Strategy confirms setup from D1 data, then watches intraday
+//
+// STRATEGY RULES (from playbook)
+// ────────────────────────────────
+//  Three components must all be present:
+//   1. Price ≥ threshold% move from last 20MA base touch (D1)
+//   2. Aggressive acceleration in candle ranges (D1 structure)
+//   3. Exhaustion day: price drops below VWAP and CANNOT reclaim it
+//
+//  Entry (choose one):
+//   VWAP_REJECTION  — bar opened below VWAP, tagged it, closed back below (safest)
+//   VWAP_LOSS       — structure break (LH+LL) and first close below VWAP together
+//   BREAK_STRUCTURE — first lower high + lower low while below VWAP (earliest/riskiest)
+//
+//  Stop:    high of exhaustion day  OR  most recent lower high
+//  TP1:     user-defined R-multiple → close 50% → move stop to break-even
+//  Risk-free add: after stop at BE, if price rejects VWAP again → add to position
+//  Max 2 attempts per exhaustion window; always close before EOD
+// ─────────────────────────────────────────────────────────────────────────────
+
+//@version=5
+strategy("Parabolic Short Strategy v1.0",
+    shorttitle          = "PS·Strategy",
+    overlay             = true,
+    initial_capital     = 100000,
+    currency            = currency.USD,
+    default_qty_type    = strategy.cash,
+    default_qty_value   = 1000,
+    commission_type     = strategy.commission.percent,
+    commission_value    = 0.05,
+    slippage            = 2,
+    calc_on_every_tick  = false,
+    process_orders_on_close = true)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+grp_setup = "=== Parabolic Setup (D1) ==="
+i_smallCapPct  = input.float(200.0, "Small-Cap threshold %",  group=grp_setup)
+i_midCapPct    = input.float(100.0, "Mid-Cap threshold %",    group=grp_setup)
+i_largeCapPct  = input.float(50.0,  "Large-Cap threshold %",  group=grp_setup)
+i_maPeriod     = input.int(20,      "MA Period",               group=grp_setup)
+i_maLookback   = input.int(60,      "Max lookback bars (D1)",  group=grp_setup)
+i_capOverride  = input.string("AUTO","Market Cap Override",
+                   options=["AUTO","SMALL","MID","LARGE"],     group=grp_setup)
+i_accelMult    = input.float(1.5,   "Structure accel multiplier", group=grp_setup)
+i_accelRecent  = input.int(5,       "Accel: recent bars",      group=grp_setup)
+i_accelPrior   = input.int(15,      "Accel: prior bars",       group=grp_setup)
+
+grp_exhaust = "=== Exhaustion Detection ==="
+i_vwapBelowBars  = input.int(1,  "Bars below VWAP to confirm exhaustion", group=grp_exhaust)
+i_vwapBandPct    = input.float(0.3,"VWAP rejection band %",   group=grp_exhaust)
+i_vwapReclaimPct = input.float(0.5,"VWAP reclaim % → setup invalid",      group=grp_exhaust)
+i_maxExhaustDays = input.int(2,  "Max days to wait for exhaustion",        group=grp_exhaust)
+
+grp_entry = "=== Entry / Stop ==="
+i_entryType = input.string("VWAP_REJECTION", "Entry Signal",
+                options=["VWAP_REJECTION","VWAP_LOSS","BREAK_STRUCTURE"], group=grp_entry)
+i_stopType  = input.string("DAY_HIGH", "Stop Anchor",
+                options=["DAY_HIGH","RECENT_LOWER_HIGH"],                  group=grp_entry)
+i_stopBufPct  = input.float(0.1, "Stop buffer above anchor (%)",           group=grp_entry)
+i_maxAttempts = input.int(2,     "Max attempts per exhaustion window",      group=grp_entry)
+
+grp_risk = "=== Trade Management ==="
+i_riskPct      = input.float(1.0,  "Risk % per trade",          group=grp_risk)
+i_tp1Ratio     = input.float(1.0,  "TP1 R-multiple",            group=grp_risk)
+i_tp1ClosePct  = input.float(50.0, "TP1 close % of position",   group=grp_risk)
+i_moveToBE     = input.bool(true,  "Move stop to break-even after TP1",    group=grp_risk)
+i_rfAdd        = input.bool(true,  "Risk-free add on 2nd VWAP rejection",  group=grp_risk)
+i_closeEOD     = input.bool(true,  "Force close at EOD",                   group=grp_risk)
+i_eodHour      = input.int(15,     "EOD close hour",   minval=0, maxval=23, group=grp_risk)
+i_eodMin       = input.int(45,     "EOD close minute", minval=0, maxval=59, group=grp_risk)
+
+grp_disp = "=== Display ==="
+i_showVWAP   = input.bool(true,  "Show VWAP",    group=grp_disp)
+i_showD1MA   = input.bool(true,  "Show D1 20MA", group=grp_disp)
+i_showTable  = input.bool(true,  "Show dashboard table", group=grp_disp)
+
+// ─── D1 Context: Parabolic Setup ──────────────────────────────────────────────
+// All setup logic computed in D1 context and pulled via request.security.
+// This runs once per completed D1 bar, so the values are stable all day.
+
+f_d1Setup(maPer, lookback, accelR, accelP, accelM) =>
+    ma20          = ta.sma(close, maPer)
+    // Find last bar where D1 close was at/below the 20MA (the "base")
+    barsBack      = int(ta.barssince(close[1] <= ta.sma(close[1], maPer)))
+    isValid       = not na(barsBack) and barsBack < lookback
+    baseClose     = isValid ? close[barsBack + 1] : na
+    movePct       = (not na(baseClose) and baseClose > 0) ?
+                    (close - baseClose) / baseClose * 100.0 : 0.0
+    // Structure acceleration
+    rngRecent     = ta.sma(high - low, accelR)
+    rngPrior      = ta.sma(high[accelR] - low[accelR], accelP)
+    accelerating  = not na(rngPrior) and rngPrior > 0 and rngRecent >= accelM * rngPrior
+    [movePct, ma20, accelerating, isValid]
+
+[d_movePct, d_ma20, d_accel, d_valid] =
+    request.security(syminfo.tickerid, "D",
+        f_d1Setup(i_maPeriod, i_maLookback, i_accelRecent, i_accelPrior, i_accelMult),
+        lookahead=barmerge.lookahead_off)
+
+// ─── Market Cap & Threshold ───────────────────────────────────────────────────
+rawMktCap  = request.financial(syminfo.tickerid, "MARKET_CAP", "FQ", ignore_invalid_symbol=true)
+mktCapB    = na(rawMktCap) ? 0.0 : rawMktCap / 1e9
+
+capAuto    = mktCapB >= 10.0 ? "LARGE" : mktCapB >= 2.0 ? "MID" : "SMALL"
+capCat     = i_capOverride == "AUTO" ? capAuto : i_capOverride
+threshold  = capCat == "LARGE" ? i_largeCapPct :
+             capCat == "MID"   ? i_midCapPct   : i_smallCapPct
+
+parabolicSetup = d_valid and d_movePct >= threshold  // D1 Filter 1 + 2
+
+// ─── Session VWAP (resets each day) ──────────────────────────────────────────
+vwap = ta.vwap(hlc3)
+
+// ─── Day Tracking ─────────────────────────────────────────────────────────────
+isNewDay       = ta.change(dayofmonth) != 0 or ta.change(month) != 0
+
+var float dayHigh         = na
+var bool  vwapCrossedToday = false
+var int   barsBelowVwap   = 0
+var int   attemptsToday   = 0
+var bool  entryFiredToday = false
+
+if isNewDay
+    dayHigh          := high
+    vwapCrossedToday := false
+    barsBelowVwap    := 0
+    attemptsToday    := 0
+    entryFiredToday  := false
+
+if high > dayHigh or na(dayHigh)
+    dayHigh := high
+
+// Track consecutive completed bars below VWAP
+if barstate.isconfirmed
+    if close < vwap
+        barsBelowVwap    := barsBelowVwap + 1
+        vwapCrossedToday := true
+    else
+        barsBelowVwap := 0
+
+// ─── Intraday Structure: Lower High + Lower Low ───────────────────────────────
+lowerHigh = barstate.isconfirmed and high < high[1]
+lowerLow  = barstate.isconfirmed and low  < low[1]
+lhll      = lowerHigh and lowerLow  // Structure breakdown signal
+
+// Recent lower high: scan last 10 bars for a swing high below day high
+f_recentLowerHigh() =>
+    result = dayHigh
+    for i = 1 to 10
+        if high[i] < dayHigh and high[i] > high[i+1] and high[i] > high[i-1]
+            result := high[i]
+            break
+    result
+
+// ─── Exhaustion Day Detection ─────────────────────────────────────────────────
+// Playbook: "price moves below VWAP and is unable to reclaim it"
+exhaustionActive = parabolicSetup and vwapCrossedToday and
+                   barsBelowVwap >= i_vwapBelowBars
+
+// Invalidation: strong VWAP reclaim
+strongReclaim = vwap > 0 and close > vwap * (1.0 + i_vwapReclaimPct / 100.0) and
+                barsBelowVwap == 0
+
+setupValid = exhaustionActive and not strongReclaim and
+             attemptsToday < i_maxAttempts and not entryFiredToday
+
+// ─── Entry Conditions ─────────────────────────────────────────────────────────
+
+// VWAP Rejection (best): bar opened below VWAP, pushed up to tag it, closed back below
+// Playbook: "price tries to move back above VWAP and fails"
+band = vwap * (i_vwapBandPct / 100.0)
+vwapRejection = barstate.isconfirmed     and
+                barsBelowVwap >= 1       and  // Already in below-VWAP territory
+                open  <  vwap            and  // Opened below VWAP
+                high  >= vwap - band     and  // Tagged VWAP (within tolerance)
+                close <  vwap                 // Failed to close above → rejection confirmed
+
+// VWAP Loss: structure breaking + first close below VWAP simultaneously
+// Playbook: "price breaks structure and loses VWAP at the same time"
+vwapLoss      = barstate.isconfirmed     and
+                lhll                     and  // Lower high + lower low
+                close < vwap             and  // Closed below VWAP
+                close[1] >= vwap[1]           // Previous bar was above VWAP (fresh cross)
+
+// Break of Structure: first LH+LL while below VWAP — earliest signal, most risk
+breakStructure = barstate.isconfirmed   and
+                 lhll                   and  // Lower high + lower low
+                 close < vwap                // Must be below VWAP for context
+
+entrySignal = setupValid and (
+    (i_entryType == "VWAP_REJECTION"  and vwapRejection)  or
+    (i_entryType == "VWAP_LOSS"       and vwapLoss)        or
+    (i_entryType == "BREAK_STRUCTURE" and breakStructure))
+
+// ─── Position State ───────────────────────────────────────────────────────────
+var float entryPrice  = na
+var float stopLevel   = na
+var float tp1Level    = na
+var bool  tp1Hit      = false
+var bool  stopAtBE    = false
+var bool  rfAdded     = false
+inShort = strategy.position_size < 0
+
+// ─── Strategy Entry ───────────────────────────────────────────────────────────
+if entrySignal and not inShort
+    stopAnchor  = i_stopType == "RECENT_LOWER_HIGH" ? f_recentLowerHigh() : dayHigh
+    sl          = stopAnchor * (1.0 + i_stopBufPct / 100.0)
+    riskDist    = sl - close
+    tp1         = close - riskDist * i_tp1Ratio
+
+    if riskDist > 0
+        strategy.entry("Short", strategy.short,
+            comment = "PS:" + i_entryType)
+
+        entryPrice  := close
+        stopLevel   := sl
+        tp1Level    := tp1
+        tp1Hit      := false
+        stopAtBE    := false
+        rfAdded     := false
+        entryFiredToday := true
+        attemptsToday   := attemptsToday + 1
+
+// ─── Strategy Exit Management ─────────────────────────────────────────────────
+if inShort
+    // TP1: partial close at R-multiple target
+    if not tp1Hit and not na(tp1Level) and low <= tp1Level
+        strategy.close("Short",
+            qty_percent = i_tp1ClosePct,
+            comment     = "TP1 (" + str.tostring(i_tp1ClosePct) + "%)")
+        tp1Hit := true
+        if i_moveToBE
+            stopLevel := entryPrice  // Move stop to break-even
+            stopAtBE  := true
+
+    // Risk-free add: 2nd VWAP rejection after stop at break-even
+    if i_rfAdd and tp1Hit and stopAtBE and not rfAdded and vwapRejection
+        strategy.entry("Short", strategy.short,
+            comment = "PS:RF_ADD")
+        rfAdded := true
+
+    // EOD force-close
+    if i_closeEOD and hour >= i_eodHour and minute >= i_eodMin
+        strategy.close_all(comment="EOD")
+        attemptsToday   := i_maxAttempts  // Prevent re-entry after EOD close
+        entryFiredToday := true
+
+    // Always maintain stop order with current level
+    if not na(stopLevel)
+        strategy.exit("SE", "Short",
+            stop    = stopLevel,
+            comment = stopAtBE ? "Stop (BE)" : "Stop")
+
+// Detect position close from stop hit → allow 2nd attempt
+if not inShort and entryFiredToday and attemptsToday < i_maxAttempts
+    entryFiredToday := false  // Re-arm for next attempt
+
+// ─── Plots ────────────────────────────────────────────────────────────────────
+
+// VWAP
+plot(i_showVWAP ? vwap : na, "VWAP", color=color.new(color.aqua, 0), linewidth=2)
+
+// D1 20MA (pulled from daily context)
+plot(i_showD1MA ? d_ma20 : na, "D1 20MA", color=color.new(color.orange, 0), linewidth=2)
+
+// Parabolic setup zone background
+bgcolor(parabolicSetup ? color.new(color.red, 93) : na, title="Parabolic zone")
+
+// Exhaustion day highlight
+bgcolor(exhaustionActive and not strongReclaim ? color.new(color.red, 82) : na,
+        title="Exhaustion active")
+
+// Entry signal markers
+plotshape(entrySignal, title="Short Entry",
+    style    = shape.triangledown,
+    location = location.abovebar,
+    color    = color.red,
+    size     = size.normal,
+    text     = "SHORT")
+
+// Stop level line
+plot(inShort and not na(stopLevel) ? stopLevel : na,
+    "Stop Level", color=color.red, linewidth=1, style=plot.style_linebr)
+
+// TP1 level line
+plot(inShort and not na(tp1Level) and not tp1Hit ? tp1Level : na,
+    "TP1 Level",  color=color.lime, linewidth=1, style=plot.style_linebr)
+
+// VWAP rejection marker
+plotshape(vwapRejection and exhaustionActive, title="VWAP Rejection",
+    style    = shape.xcross,
+    location = location.abovebar,
+    color    = color.new(color.red, 20),
+    size     = size.small)
+
+// ─── Dashboard Table ──────────────────────────────────────────────────────────
+var table dash = table.new(position.top_right, 2, 11,
+    bgcolor      = color.new(color.black, 60),
+    border_color = color.new(color.gray,  50),
+    border_width = 1,
+    frame_color  = color.new(color.white, 50),
+    frame_width  = 1)
+
+f_dashCell(col, row, txt, tc, bg) =>
+    table.cell(dash, col, row, txt, text_color=tc, bgcolor=bg, text_size=size.small)
+
+stateColor   = inShort            ? color.new(color.red,   30) :
+               exhaustionActive   ? color.new(color.orange, 30) :
+               parabolicSetup     ? color.new(color.yellow, 50) :
+               color.new(color.gray, 60)
+
+stateLabel   = inShort            ? "IN TRADE (SHORT)" :
+               exhaustionActive   ? "EXHAUSTION — watching" :
+               parabolicSetup     ? "PARABOLIC — setup active" : "scanning..."
+
+if i_showTable and barstate.islast
+    header = color.new(color.new(color.navy, 0), 40)
+    f_dashCell(0, 0, "PARABOLIC SHORT v1.0", color.white,  header)
+    f_dashCell(1, 0, syminfo.ticker,          color.yellow, header)
+
+    f_dashCell(0, 1, "State",              color.new(color.white, 20), stateColor)
+    f_dashCell(1, 1, stateLabel,           color.white,               stateColor)
+
+    f_dashCell(0, 2, "Cap / Threshold",    color.new(color.white, 30), color.new(color.black, 70))
+    f_dashCell(1, 2, capCat + "  ≥" + str.tostring(threshold, "#") + "%",
+               color.white, color.new(color.black, 70))
+
+    moveCol = d_movePct >= threshold ? color.lime : color.orange
+    f_dashCell(0, 3, "D1 Move from Base",  color.new(color.white, 30), color.new(color.black, 70))
+    f_dashCell(1, 3, str.tostring(math.round(d_movePct, 1)) + "%",
+               moveCol, color.new(color.black, 70))
+
+    f_dashCell(0, 4, "D1 Structure Accel", color.new(color.white, 30), color.new(color.black, 70))
+    f_dashCell(1, 4, d_accel ? "✓ YES" : "– no",
+               d_accel ? color.lime : color.gray, color.new(color.black, 70))
+
+    f_dashCell(0, 5, "VWAP",              color.new(color.white, 30), color.new(color.black, 70))
+    f_dashCell(1, 5, not na(vwap) ? str.tostring(vwap, format.mintick) : "—",
+               color.aqua, color.new(color.black, 70))
+
+    f_dashCell(0, 6, "Below VWAP",        color.new(color.white, 30), color.new(color.black, 70))
+    f_dashCell(1, 6, str.tostring(barsBelowVwap) + " bars  crossed:" +
+               (vwapCrossedToday ? " yes" : " no"),
+               vwapCrossedToday ? color.orange : color.gray, color.new(color.black, 70))
+
+    f_dashCell(0, 7, "LH+LL (structure)", color.new(color.white, 30), color.new(color.black, 70))
+    f_dashCell(1, 7, lhll ? "✓ forming" : "– waiting",
+               lhll ? color.orange : color.gray, color.new(color.black, 70))
+
+    f_dashCell(0, 8, "Entry type",        color.new(color.white, 30), color.new(color.black, 70))
+    f_dashCell(1, 8, i_entryType,         color.white, color.new(color.black, 70))
+
+    f_dashCell(0, 9, "Attempt",           color.new(color.white, 30), color.new(color.black, 70))
+    f_dashCell(1, 9, str.tostring(attemptsToday) + " / " + str.tostring(i_maxAttempts),
+               attemptsToday < i_maxAttempts ? color.white : color.red,
+               color.new(color.black, 70))
+
+    tradeRow = color.new(inShort ? color.new(color.red, 60) : color.black, 70)
+    f_dashCell(0, 10, "Stop / TP1",       color.new(color.white, 30), tradeRow)
+    tradeStr  = inShort and not na(stopLevel) ?
+                "SL " + str.tostring(stopLevel, format.mintick) +
+                (stopAtBE ? " [BE]" : "") +
+                "  TP1 " + (tp1Hit ? "✓" : str.tostring(tp1Level, format.mintick)) :
+                "—"
+    f_dashCell(1, 10, tradeStr,           inShort ? color.white : color.gray, tradeRow)
+
+// ─── Alerts ───────────────────────────────────────────────────────────────────
+alertcondition(entrySignal,
+    title   = "Parabolic Short — Entry Signal",
+    message = "{{ticker}} [{{interval}}] | SHORT entry | Type: " + i_entryType +
+              " | Price: {{close}} | Cap: " + capCat +
+              " | Move: {{plot_0}}%")
+
+alertcondition(vwapRejection and exhaustionActive,
+    title   = "Parabolic Short — VWAP Rejection",
+    message = "{{ticker}} [{{interval}}] | VWAP Rejection on exhaustion day | Price: {{close}}")
+
+alertcondition(strongReclaim and parabolicSetup,
+    title   = "Parabolic Short — Setup INVALIDATED",
+    message = "{{ticker}} [{{interval}}] | VWAP reclaimed — setup no longer valid")
+
+alertcondition(tp1Hit and inShort,
+    title   = "Parabolic Short — TP1 Hit",
+    message = "{{ticker}} [{{interval}}] | TP1 reached — partial close, stop to BE")
