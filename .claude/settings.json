@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,os,subprocess,sys; inp=os.environ.get('CLAUDE_TOOL_INPUT','{}'); d=json.loads(inp); f=d.get('file_path',''); r=subprocess.run(['flake8',f,'--max-line-length=100','--quiet'],capture_output=True,text=True) if f.endswith('.py') and os.path.exists(f) else None; out=(r.stdout+r.stderr).strip() if r else ''; print(f'[lint] {out}') if out else None\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,os; d=json.loads(os.environ.get('CLAUDE_TOOL_INPUT','{}'),); f=d.get('file_path',''); print(f'[EA modified] {os.path.basename(f)} — run /deploy-ea to copy to MetaTrader Experts folder') if f.endswith('.mq5') else None\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,os,re; d=json.loads(os.environ.get('CLAUDE_TOOL_INPUT','{}'),); f=d.get('file_path',''); content=open(f).read() if f and os.path.exists(f) else ''; patterns=['sk-ant-api','password\\\\s*=\\\\s*[\\\"\\'][^\\\"\\']','MT5_PASSWORD\\\\s*=\\\\s*[^\\$]']; found=[p for p in patterns if re.search(p,content,re.I)]; print(f'[SECURITY WARNING] Possible credential in {f}: {found}') if found else None\""
+          }
+        ]
+      }
+    ]
+  }
+}
