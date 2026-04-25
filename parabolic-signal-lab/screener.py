@@ -1,31 +1,23 @@
 """
 Parabolic Short Strategy — Full Market Screener
 ================================================
-Scans the US stock universe for parabolic move setups matching
-the Marios Stamatoudis playbook criteria:
+Scans the NASDAQ, NYSE, and S&P 500 universe for stocks meeting all
+playbook conditions, classified by market category:
 
-  Filter 1 – Size of move from last 20-day MA base touch
-    Small-cap  (market cap < $2B)  : ≥ 200%
-    Mid-cap    ($2B – $10B)        : ≥ 100%
-    Large-cap  (> $10B)            : ≥  50%
+  MARKET_LEADER  Large-cap > $10B  — threshold ≥ 50%   (stable names, 10–20% expected drop)
+  THEMATIC       Mid-cap  $2–10B   — threshold ≥ 100%  (sector/theme runners, 20–40% drop)
+  IPO_SMALL_CAP  Small-cap < $2B   — threshold ≥ 200%  (most aggressive, sharpest reversals)
 
-  Filter 2 – Aggressive structure (slope acceleration proxy)
-    Average of last 5 daily ranges ≥ N × average of prior 15 ranges
+Data: yfinance (free, no API key)
+Enrichment: OctagonAI MCP (top candidates only — run /financial-analyst-master <TICKER>)
 
-Output
-------
-  • Console table of qualifying symbols ranked by move %
-  • CSV file: parabolic_candidates_YYYYMMDD.csv
-  • Optional: mt5_watchlist.txt  (one symbol per line, paste into MT5)
-
-Usage
------
-  pip install yfinance pandas numpy tqdm
-  python screener.py
-  python screener.py --universe sp500          # S&P 500 only
-  python screener.py --universe russell2000    # Russell 2000
-  python screener.py --universe custom --file tickers.txt
-  python screener.py --small-cap-pct 150 --mid-cap-pct 80
+Usage:
+  python screener.py                                    # scan S&P 500
+  python screener.py --universe nasdaq                  # full NASDAQ
+  python screener.py --universe all                     # NASDAQ + NYSE + S&P 500
+  python screener.py --universe all --category THEMATIC # thematic only
+  python screener.py --tickers NVDA SMCI MSTR           # specific tickers
+  python screener.py --no-accel-filter                  # skip Filter 2 for wider results
 """
 
 import argparse
@@ -40,318 +32,339 @@ import pandas as pd
 import yfinance as yf
 from tqdm import tqdm
 
+# ─── Strategy constants ────────────────────────────────────────────────────────
+MA_PERIOD       = 20    # D1 bars for base MA
+MA_LOOKBACK     = 90    # max bars back to find last MA touch
+ACCEL_RECENT    = 5     # candle range acceleration — recent window
+ACCEL_PRIOR     = 15    # candle range acceleration — prior baseline
+ACCEL_MULT      = 1.5   # recent avg range must be >= N× prior avg range
+MAX_PULLBACKS   = 3     # max significant down-days (pullbacks) in the run
+PULLBACK_PCT    = 2.0   # min % daily decline to count as a pressure-release pullback
 
-# ─── Cap-category thresholds ──────────────────────────────────────────────────
-SMALL_CAP_MAX_B   = 2.0    # market cap < $2B  → small-cap
-MID_CAP_MAX_B     = 10.0   # market cap < $10B → mid-cap
-                            # else              → large-cap
+# Market cap boundaries
+LARGE_CAP_B     = 10.0
+MID_CAP_B       = 2.0
 
-# ─── Default move thresholds (can be overridden via CLI) ──────────────────────
-DEFAULT_SMALL_CAP_PCT  = 200.0
-DEFAULT_MID_CAP_PCT    = 100.0
-DEFAULT_LARGE_CAP_PCT  = 50.0
-
-# ─── Structure acceleration filter ───────────────────────────────────────────
-ACCEL_RECENT_BARS  = 5     # recent bars for range average
-ACCEL_PRIOR_BARS   = 15    # prior bars for baseline range average
-ACCEL_MULTIPLIER   = 1.5   # recent avg range must be ≥ N × prior avg range
-
-MA_PERIOD          = 20    # days
-MA_LOOKBACK        = 90    # max daily bars to look back for last MA touch
+# Default thresholds
+DEFAULT_THRESHOLDS = {
+    "MARKET_LEADER":  50.0,
+    "THEMATIC":       100.0,
+    "IPO_SMALL_CAP":  200.0,
+}
 
 
-# ─── Stock universe helpers ───────────────────────────────────────────────────
-
-def get_sp500_tickers() -> list[str]:
-    """Fetch current S&P 500 tickers from Wikipedia."""
+# ─── Universe helpers ──────────────────────────────────────────────────────────
+def get_sp500() -> list[str]:
     try:
-        tables = pd.read_html(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", header=0
-        )
-        return tables[0]["Symbol"].str.replace(".", "-", regex=False).tolist()
+        df = pd.read_html(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        )[0]
+        return df["Symbol"].str.replace(".", "-", regex=False).tolist()
     except Exception as e:
-        print(f"[WARN] Could not fetch S&P 500 list: {e}")
+        print(f"[WARN] S&P 500 fetch failed: {e}")
         return []
 
 
-def get_russell2000_tickers() -> list[str]:
+def get_exchange_tickers(exchange: str) -> list[str]:
     """
-    Russell 2000 tickers — iShares IWM holdings are the canonical source.
-    Falls back to a curated small-cap list if the download fails.
+    Fetch listed stocks from NASDAQ trader FTP directory.
+    exchange: 'nasdaq' | 'nyse'
     """
+    import requests
+    urls = {
+        "nasdaq": "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
+        "nyse":   "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
+    }
+    url = urls.get(exchange.lower())
+    if not url:
+        return []
     try:
-        url = (
-            "https://www.ishares.com/us/products/239710/IWM/"
-            "1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund"
-        )
-        df = pd.read_csv(url, skiprows=9, on_bad_lines="skip")
-        col = [c for c in df.columns if "ticker" in c.lower() or "symbol" in c.lower()]
-        if col:
-            tickers = df[col[0]].dropna().astype(str).tolist()
-            return [t.strip() for t in tickers if t.strip() and t.strip() != "-"]
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        r.raise_for_status()
+        tickers = []
+        for line in r.text.splitlines()[1:]:
+            if "|" not in line or line.startswith("File Creation"):
+                continue
+            parts = line.split("|")
+            ticker = parts[0].strip()
+            # Skip test symbols, preferred shares, warrants, units
+            if not ticker or any(c in ticker for c in ["$", "+", " "]) or len(ticker) > 5:
+                continue
+            tickers.append(ticker)
+        return tickers
     except Exception as e:
-        print(f"[WARN] Could not fetch Russell 2000 list: {e}")
-    return []
+        print(f"[WARN] {exchange} FTP fetch failed: {e}")
+        return []
 
 
-def get_nasdaq100_tickers() -> list[str]:
-    try:
-        tables = pd.read_html(
-            "https://en.wikipedia.org/wiki/Nasdaq-100", header=0
-        )
-        for t in tables:
-            if "Ticker" in t.columns:
-                return t["Ticker"].dropna().tolist()
-    except Exception as e:
-        print(f"[WARN] Could not fetch Nasdaq-100 list: {e}")
-    return []
-
-
-def load_custom_tickers(filepath: str) -> list[str]:
-    p = Path(filepath)
-    if not p.exists():
-        print(f"[ERROR] Ticker file not found: {filepath}")
+def build_universe(universe: str) -> list[str]:
+    """Return deduplicated ticker list for the requested universe."""
+    tickers: list[str] = []
+    if universe in ("sp500", "all"):
+        tickers += get_sp500()
+    if universe in ("nasdaq", "all"):
+        tickers += get_exchange_tickers("nasdaq")
+    if universe in ("nyse", "all"):
+        tickers += get_exchange_tickers("nyse")
+    if universe == "sp500" and not tickers:
+        print("[ERROR] Could not fetch S&P 500 tickers.")
         sys.exit(1)
-    tickers = []
-    with open(p) as f:
-        for line in f:
-            t = line.strip().upper()
-            if t and not t.startswith("#"):
-                tickers.append(t)
-    return tickers
+    # Deduplicate preserving order
+    seen: set[str] = set()
+    unique = []
+    for t in tickers:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return unique
+
+
+# ─── Cap classification ────────────────────────────────────────────────────────
+def classify_cap(mkt_cap_usd: float | None) -> str:
+    if mkt_cap_usd is None:
+        return "IPO_SMALL_CAP"
+    b = mkt_cap_usd / 1e9
+    if b >= LARGE_CAP_B:
+        return "MARKET_LEADER"
+    if b >= MID_CAP_B:
+        return "THEMATIC"
+    return "IPO_SMALL_CAP"
 
 
 # ─── Core analysis ────────────────────────────────────────────────────────────
-
-def analyse_ticker(ticker: str, cfg: dict) -> dict | None:
+def analyse_ticker(
+    ticker: str,
+    thresholds: dict[str, float],
+    require_accel: bool = True,
+    category_filter: str | None = None,
+) -> dict | None:
     """
-    Returns a result dict if the symbol qualifies, else None.
-    Downloads D1 data via yfinance (cached per session via yf internal cache).
+    Downloads D1 data for ticker and checks all three playbook filters.
+    Returns a result dict if the stock qualifies, else None.
+
+    Filter 1 — Size of Move:  price ≥ threshold% from last 20MA base touch
+    Filter 2 — Aggressive Structure: candle range acceleration + low pullback count
+    (Filter 3 — Exhaustion Day is checked in backtest.py using intraday data)
     """
     try:
-        tk   = yf.Ticker(ticker)
-        hist = tk.history(period="6mo", interval="1d", auto_adjust=True)
+        tk    = yf.Ticker(ticker)
+        hist  = tk.history(period="6mo", interval="1d", auto_adjust=True)
 
-        if hist is None or len(hist) < MA_PERIOD + ACCEL_RECENT_BARS + ACCEL_PRIOR_BARS:
+        if hist is None or len(hist) < MA_PERIOD + ACCEL_PRIOR + ACCEL_RECENT + 5:
             return None
 
         closes = hist["Close"].values.astype(float)
+        opens  = hist["Open"].values.astype(float)
         highs  = hist["High"].values.astype(float)
         lows   = hist["Low"].values.astype(float)
         n      = len(closes)
 
-        # ── 20-day SMA ───────────────────────────────────────────
-        ma = np.array([
-            closes[i - MA_PERIOD + 1 : i + 1].mean()
+        # ── Market cap & cap category ──────────────────────────────────────
+        info      = tk.fast_info
+        cap_usd   = getattr(info, "market_cap", None)
+        cap_b     = cap_usd / 1e9 if cap_usd else None
+        category  = classify_cap(cap_usd)
+        threshold = thresholds.get(category, 200.0)
+
+        if category_filter and category != category_filter:
+            return None
+
+        # ── Filter 1: Size of move from last 20MA base touch ──────────────
+        ma20 = np.array([
+            closes[max(0, i - MA_PERIOD + 1):i + 1].mean()
             if i >= MA_PERIOD - 1 else np.nan
             for i in range(n)
         ])
 
-        # ── Last 20MA base touch (most recent bar where close ≤ MA) ─
-        touch_bar = -1
+        # Most recent bar where close was at or below the 20MA
+        touch_idx = -1
         for i in range(n - 2, MA_PERIOD - 1, -1):
-            if np.isnan(ma[i]):
-                continue
-            if closes[i] <= ma[i]:
-                touch_bar = i
+            if not np.isnan(ma20[i]) and closes[i] <= ma20[i]:
+                touch_idx = i
                 break
 
-        if touch_bar < 0:
+        if touch_idx < 0:
             return None
 
-        base_close  = closes[touch_bar]
-        cur_close   = closes[-1]
+        base_close = closes[touch_idx]
+        cur_close  = closes[-1]
         if base_close <= 0:
             return None
 
         move_pct = ((cur_close - base_close) / base_close) * 100.0
-
-        # ── Market cap & threshold ────────────────────────────────
-        info       = tk.fast_info
-        mkt_cap_b  = getattr(info, "market_cap", None)
-        mkt_cap_b  = mkt_cap_b / 1e9 if mkt_cap_b else None
-
-        if mkt_cap_b is not None:
-            if mkt_cap_b < SMALL_CAP_MAX_B:
-                cap_label   = "SMALL"
-                threshold   = cfg["small_cap_pct"]
-            elif mkt_cap_b < MID_CAP_MAX_B:
-                cap_label   = "MID"
-                threshold   = cfg["mid_cap_pct"]
-            else:
-                cap_label   = "LARGE"
-                threshold   = cfg["large_cap_pct"]
-        else:
-            # Unknown cap — use small-cap threshold (conservative)
-            cap_label   = "UNKNOWN"
-            threshold   = cfg["small_cap_pct"]
-
         if move_pct < threshold:
             return None
 
-        # ── Filter 2: Structure acceleration ─────────────────────
-        ranges       = highs - lows
-        recent_avg   = ranges[-ACCEL_RECENT_BARS:].mean()
-        prior_start  = -(ACCEL_RECENT_BARS + ACCEL_PRIOR_BARS)
-        prior_end    = -ACCEL_RECENT_BARS
-        prior_avg    = ranges[prior_start:prior_end].mean()
-        accelerating = (prior_avg > 0 and recent_avg >= ACCEL_MULTIPLIER * prior_avg)
+        bars_since_touch = (n - 1) - touch_idx
 
-        bars_since_touch = (n - 1) - touch_bar
+        # ── Filter 2: Aggressive structure ────────────────────────────────
+        # 2a. Candle-range acceleration: recent bars significantly larger than prior
+        ranges       = highs - lows
+        recent_avg   = ranges[-ACCEL_RECENT:].mean()
+        prior_start  = -(ACCEL_RECENT + ACCEL_PRIOR)
+        prior_end    = -ACCEL_RECENT
+        prior_avg    = ranges[prior_start:prior_end].mean()
+        accelerating = prior_avg > 0 and recent_avg >= ACCEL_MULT * prior_avg
+
+        # 2b. Pullback count: few significant down-days = pressure NOT released
+        # Playbook: "other stocks move up but include regular pullbacks;
+        #            these pullbacks release pressure, which reduces the chance"
+        pullbacks = 0
+        for i in range(touch_idx + 1, n):
+            if opens[i] > 0:
+                daily_chg = (closes[i] - opens[i]) / opens[i] * 100.0
+                if daily_chg <= -PULLBACK_PCT:
+                    pullbacks += 1
+
+        few_pullbacks = pullbacks <= MAX_PULLBACKS
+        filter2_pass  = accelerating or few_pullbacks
+
+        if require_accel and not filter2_pass:
+            return None
+
+        # ── Sector / theme flag ────────────────────────────────────────────
+        sector = ""
+        try:
+            sector = tk.info.get("sector", "") or ""
+        except Exception:
+            pass
 
         return {
-            "ticker":           ticker,
-            "cap":              cap_label,
-            "mkt_cap_b":        round(mkt_cap_b, 2) if mkt_cap_b else None,
-            "move_pct":         round(move_pct, 1),
-            "threshold_pct":    threshold,
-            "cur_close":        round(cur_close, 2),
-            "base_close":       round(base_close, 2),
-            "bars_since_touch": bars_since_touch,
-            "accelerating":     accelerating,
-            "recent_range_avg": round(recent_avg, 4),
-            "prior_range_avg":  round(prior_avg, 4),
+            "ticker":          ticker,
+            "category":        category,
+            "mkt_cap_b":       round(cap_b, 2) if cap_b else None,
+            "threshold_pct":   threshold,
+            "move_pct":        round(move_pct, 1),
+            "cur_price":       round(cur_close, 2),
+            "base_price":      round(base_close, 2),
+            "bars_since_touch":bars_since_touch,
+            "accelerating":    accelerating,
+            "pullbacks":       pullbacks,
+            "filter2_pass":    filter2_pass,
+            "sector":          sector,
         }
 
     except Exception:
         return None
 
 
-# ─── Output helpers ───────────────────────────────────────────────────────────
-
+# ─── Output ────────────────────────────────────────────────────────────────────
 def print_table(results: list[dict]) -> None:
     if not results:
         print("\nNo qualifying symbols found.")
         return
 
-    hdr = f"{'#':<4} {'Ticker':<8} {'Cap':<8} {'Mkt Cap':>9} {'Move%':>8} {'Thresh':>7} {'Price':>8} {'Base':>8} {'Bars':>5} {'Accel':<6}"
-    print("\n" + "═" * len(hdr))
-    print("  PARABOLIC SHORT CANDIDATES")
-    print("═" * len(hdr))
-    print(hdr)
-    print("─" * len(hdr))
-    for i, r in enumerate(results, 1):
-        cap_str = f"${r['mkt_cap_b']:.1f}B" if r["mkt_cap_b"] else "n/a"
-        accel   = "YES" if r["accelerating"] else "no"
-        print(
-            f"{i:<4} {r['ticker']:<8} {r['cap']:<8} {cap_str:>9} "
-            f"{r['move_pct']:>7.1f}% {r['threshold_pct']:>6.0f}% "
-            f"{r['cur_close']:>8.2f} {r['base_close']:>8.2f} "
-            f"{r['bars_since_touch']:>5} {accel:<6}"
-        )
-    print("═" * len(hdr))
-    print(f"  {len(results)} qualifying symbols\n")
+    # Group by category
+    groups = {
+        "MARKET_LEADER":  [r for r in results if r["category"] == "MARKET_LEADER"],
+        "THEMATIC":       [r for r in results if r["category"] == "THEMATIC"],
+        "IPO_SMALL_CAP":  [r for r in results if r["category"] == "IPO_SMALL_CAP"],
+    }
+
+    labels = {
+        "MARKET_LEADER": f"MARKET LEADERS  (≥50% threshold)  —  expect 10–20% drop",
+        "THEMATIC":      f"THEMATIC / MID-CAP  (≥100%)  —  expect 20–40% drop",
+        "IPO_SMALL_CAP": f"IPO / SMALL-CAP  (≥200%)  —  most aggressive reversals",
+    }
+
+    hdr = f"{'#':<4} {'Ticker':<8} {'Cap $B':>8} {'Move%':>8} {'Need':>6} {'Price':>8} {'Base':>8} {'Bars':>5} {'F2':>4} {'Sector'}"
+    sep = "─" * len(hdr)
+
+    for cat, rows in groups.items():
+        if not rows:
+            continue
+        print(f"\n{'═'*len(hdr)}")
+        print(f"  {labels[cat]}  ({len(rows)} found)")
+        print(f"{'═'*len(hdr)}")
+        print(hdr)
+        print(sep)
+        for i, r in enumerate(rows, 1):
+            cap_str = f"${r['mkt_cap_b']:.1f}" if r["mkt_cap_b"] else "n/a"
+            print(
+                f"{i:<4} {r['ticker']:<8} {cap_str:>8} "
+                f"{r['move_pct']:>7.1f}% {r['threshold_pct']:>5.0f}% "
+                f"{r['cur_price']:>8.2f} {r['base_price']:>8.2f} "
+                f"{r['bars_since_touch']:>5} "
+                f"{'✓' if r['filter2_pass'] else '✗':>4}  "
+                f"{r['sector']}"
+            )
+        print(sep)
+
+    print(f"\nTotal qualifying: {len(results)}")
+    print("\nNext step: run /financial-analyst-master <TICKER> on top candidates for OctagonAI enrichment")
 
 
-def save_csv(results: list[dict], out_dir: Path) -> Path:
-    today    = datetime.date.today().strftime("%Y%m%d")
-    out_path = out_dir / f"parabolic_candidates_{today}.csv"
+def save_outputs(results: list[dict], out_dir: Path) -> None:
     if not results:
-        return out_path
-    with open(out_path, "w", newline="") as f:
+        return
+    today    = datetime.date.today().strftime("%Y%m%d")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = out_dir / f"parabolic_candidates_{today}.csv"
+    with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=results[0].keys())
         writer.writeheader()
         writer.writerows(results)
-    return out_path
 
-
-def save_mt5_watchlist(results: list[dict], out_dir: Path) -> Path:
-    """One ticker per line — paste into MT5 Market Watch → Symbols → Import."""
-    today    = datetime.date.today().strftime("%Y%m%d")
-    out_path = out_dir / f"mt5_watchlist_{today}.txt"
-    with open(out_path, "w") as f:
+    wl_path = out_dir / f"watchlist_{today}.txt"
+    with open(wl_path, "w") as f:
         for r in results:
-            # MT5 brokers often use suffixes like .US — adjust here if needed
-            f.write(r["ticker"] + "\n")
-    return out_path
+            f.write(f"{r['ticker']}\t{r['category']}\t{r['move_pct']}%\n")
+
+    print(f"\nCSV     : {csv_path}")
+    print(f"Watchlist: {wl_path}")
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
-
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Parabolic Short Strategy screener")
-    p.add_argument(
-        "--universe",
-        choices=["sp500", "nasdaq100", "russell2000", "custom"],
-        default="sp500",
-        help="Stock universe to scan (default: sp500)",
-    )
-    p.add_argument("--file",    default="tickers.txt", help="Ticker file for --universe custom")
-    p.add_argument("--small-cap-pct", type=float, default=DEFAULT_SMALL_CAP_PCT)
-    p.add_argument("--mid-cap-pct",   type=float, default=DEFAULT_MID_CAP_PCT)
-    p.add_argument("--large-cap-pct", type=float, default=DEFAULT_LARGE_CAP_PCT)
+    p = argparse.ArgumentParser(description="Parabolic Short Screener")
+    p.add_argument("--universe",  default="sp500",
+                   choices=["sp500", "nasdaq", "nyse", "all"],
+                   help="Stock universe to scan")
+    p.add_argument("--tickers",   nargs="+", help="Override with specific tickers")
+    p.add_argument("--category",  choices=["MARKET_LEADER", "THEMATIC", "IPO_SMALL_CAP"],
+                   help="Filter to one category only")
     p.add_argument("--no-accel-filter", action="store_true",
-                   help="Skip structure acceleration check (Filter 2)")
-    p.add_argument("--out-dir", default=".", help="Output directory for CSV / watchlist")
-    p.add_argument("--delay",   type=float, default=0.15,
-                   help="Seconds between yfinance requests (rate-limit courtesy)")
+                   help="Skip Filter 2 (wider results)")
+    p.add_argument("--delay",     type=float, default=0.1,
+                   help="Seconds between requests")
+    p.add_argument("--out-dir",   default="output",
+                   help="Output directory for CSV / watchlist")
     return p.parse_args()
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
-
 def main() -> None:
-    args = parse_args()
+    args    = parse_args()
+    tickers = args.tickers if args.tickers else build_universe(args.universe)
 
-    cfg = {
-        "small_cap_pct": args.small_cap_pct,
-        "mid_cap_pct":   args.mid_cap_pct,
-        "large_cap_pct": args.large_cap_pct,
-    }
+    thresholds = DEFAULT_THRESHOLDS.copy()
 
-    # ── Load universe ─────────────────────────────────────────────
-    print(f"\nLoading universe: {args.universe} ...")
-    if args.universe == "sp500":
-        tickers = get_sp500_tickers()
-    elif args.universe == "nasdaq100":
-        tickers = get_nasdaq100_tickers()
-    elif args.universe == "russell2000":
-        tickers = get_russell2000_tickers()
-    else:
-        tickers = load_custom_tickers(args.file)
+    print(f"\nParabolic Short Screener")
+    print(f"Universe : {args.universe.upper()}  ({len(tickers)} symbols)")
+    print(f"Category : {args.category or 'ALL'}")
+    print(f"Filter 2 : {'OFF' if args.no_accel_filter else 'ON'}")
+    print(f"Thresholds: Leader≥{thresholds['MARKET_LEADER']}%  "
+          f"Thematic≥{thresholds['THEMATIC']}%  "
+          f"Small≥{thresholds['IPO_SMALL_CAP']}%\n")
 
-    if not tickers:
-        print("[ERROR] No tickers loaded. Exiting.")
-        sys.exit(1)
-
-    print(f"Scanning {len(tickers)} symbols — thresholds: "
-          f"Small≥{cfg['small_cap_pct']}%  Mid≥{cfg['mid_cap_pct']}%  Large≥{cfg['large_cap_pct']}%")
-    print(f"Structure accel filter: {'OFF' if args.no_accel_filter else 'ON'} "
-          f"(recent {ACCEL_RECENT_BARS}d avg ≥ {ACCEL_MULTIPLIER}× prior {ACCEL_PRIOR_BARS}d avg)\n")
-
-    # ── Scan ──────────────────────────────────────────────────────
-    results = []
-    errors  = 0
+    results: list[dict] = []
 
     for ticker in tqdm(tickers, unit="sym", ncols=80):
-        res = analyse_ticker(ticker, cfg)
-        if res is not None:
-            # Optionally require structure acceleration (Filter 2)
-            if not args.no_accel_filter and not res["accelerating"]:
-                continue
+        res = analyse_ticker(
+            ticker,
+            thresholds,
+            require_accel=not args.no_accel_filter,
+            category_filter=args.category,
+        )
+        if res:
             results.append(res)
         time.sleep(args.delay)
 
-    # Sort by move % descending
-    results.sort(key=lambda x: x["move_pct"], reverse=True)
+    # Sort by move % descending within each category
+    results.sort(key=lambda r: (r["category"], -r["move_pct"]))
 
-    # ── Print & save ──────────────────────────────────────────────
     print_table(results)
-
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    csv_path = save_csv(results, out_dir)
-    wl_path  = save_mt5_watchlist(results, out_dir)
-
-    if results:
-        print(f"CSV saved      : {csv_path}")
-        print(f"MT5 watchlist  : {wl_path}")
-        print("\nNext step: in MetaTrader 5 → Market Watch (Ctrl+M)")
-        print("  Right-click → Show All, then search for each symbol,")
-        print("  OR use the mt5_watchlist file as a reference to add symbols manually.")
-    else:
-        print("No results to save.")
+    save_outputs(results, Path(args.out_dir))
 
 
 if __name__ == "__main__":
