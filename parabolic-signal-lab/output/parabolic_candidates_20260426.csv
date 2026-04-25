@@ -1,0 +1,6 @@
+ticker,category,mkt_cap_b,threshold_pct,move_pct,cur_price,base_price,bars_since_touch,accelerating,pullbacks,filter2_pass,sector
+INTC,MARKET_LEADER,414.85,50.0,87.0,82.54,44.13,17,False,3,True,Technology
+AMD,MARKET_LEADER,567.07,50.0,77.4,347.81,196.04,18,True,1,True,Technology
+ON,MARKET_LEADER,38.7,50.0,76.8,98.4,55.66,18,False,0,True,Technology
+MPWR,MARKET_LEADER,80.16,50.0,63.2,1632.06,1000.34,18,False,0,True,Technology
+STX,MARKET_LEADER,131.33,50.0,61.8,586.25,362.43,18,False,1,True,Technology
