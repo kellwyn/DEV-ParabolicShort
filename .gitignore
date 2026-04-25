@@ -1,0 +1,33 @@
+# ── Credentials / secrets ──────────────────────────────────────────────────────
+.env
+.env.example
+.env.local
+.env.*.local
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# ── Node ───────────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+
+# ── MetaTrader build artifacts ─────────────────────────────────────────────────
+*.ex5
+*.log
+
+# ── OS / editors ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
