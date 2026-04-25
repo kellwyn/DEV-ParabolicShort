@@ -1,15 +1,15 @@
 """
-Parabolic Short Strategy — Full Market Screener
+Parabolic Short Strategy  -  Full Market Screener
 ================================================
 Scans the NASDAQ, NYSE, and S&P 500 universe for stocks meeting all
 playbook conditions, classified by market category:
 
-  MARKET_LEADER  Large-cap > $10B  — threshold ≥ 50%   (stable names, 10–20% expected drop)
-  THEMATIC       Mid-cap  $2–10B   — threshold ≥ 100%  (sector/theme runners, 20–40% drop)
-  IPO_SMALL_CAP  Small-cap < $2B   — threshold ≥ 200%  (most aggressive, sharpest reversals)
+  MARKET_LEADER  Large-cap > $10B   -  threshold >= 50%   (stable names, 10-20% expected drop)
+  THEMATIC       Mid-cap  $2-10B    -  threshold >= 100%  (sector/theme runners, 20-40% drop)
+  IPO_SMALL_CAP  Small-cap < $2B    -  threshold >= 200%  (most aggressive, sharpest reversals)
 
 Data: yfinance (free, no API key)
-Enrichment: OctagonAI MCP (top candidates only — run /financial-analyst-master <TICKER>)
+Enrichment: OctagonAI MCP (top candidates only  -  run /financial-analyst-master <TICKER>)
 
 Usage:
   python screener.py                                    # scan S&P 500
@@ -32,12 +32,12 @@ import pandas as pd
 import yfinance as yf
 from tqdm import tqdm
 
-# ─── Strategy constants ────────────────────────────────────────────────────────
+# --- Strategy constants --------------------------------------------------------
 MA_PERIOD       = 20    # D1 bars for base MA
 MA_LOOKBACK     = 90    # max bars back to find last MA touch
-ACCEL_RECENT    = 5     # candle range acceleration — recent window
-ACCEL_PRIOR     = 15    # candle range acceleration — prior baseline
-ACCEL_MULT      = 1.5   # recent avg range must be >= N× prior avg range
+ACCEL_RECENT    = 5     # candle range acceleration  -  recent window
+ACCEL_PRIOR     = 15    # candle range acceleration  -  prior baseline
+ACCEL_MULT      = 1.5   # recent avg range must be >= Nx prior avg range
 MAX_PULLBACKS   = 3     # max significant down-days (pullbacks) in the run
 PULLBACK_PCT    = 2.0   # min % daily decline to count as a pressure-release pullback
 
@@ -53,15 +53,31 @@ DEFAULT_THRESHOLDS = {
 }
 
 
-# ─── Universe helpers ──────────────────────────────────────────────────────────
+# --- Universe helpers ----------------------------------------------------------
 def get_sp500() -> list[str]:
+    import requests, io
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        df = pd.read_html(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        )[0]
+        r = requests.get(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers=headers, timeout=20
+        )
+        r.raise_for_status()
+        df = pd.read_html(io.StringIO(r.text))[0]
         return df["Symbol"].str.replace(".", "-", regex=False).tolist()
     except Exception as e:
-        print(f"[WARN] S&P 500 fetch failed: {e}")
+        print(f"[WARN] Wikipedia S&P 500 failed ({e}), trying slickcharts...")
+    try:
+        r = requests.get(
+            "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv",
+            headers=headers, timeout=20
+        )
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        col = [c for c in df.columns if "symbol" in c.lower() or "ticker" in c.lower()][0]
+        return df[col].str.replace(".", "-", regex=False).tolist()
+    except Exception as e:
+        print(f"[WARN] S&P 500 backup also failed: {e}")
         return []
 
 
@@ -119,7 +135,7 @@ def build_universe(universe: str) -> list[str]:
     return unique
 
 
-# ─── Cap classification ────────────────────────────────────────────────────────
+# --- Cap classification --------------------------------------------------------
 def classify_cap(mkt_cap_usd: float | None) -> str:
     if mkt_cap_usd is None:
         return "IPO_SMALL_CAP"
@@ -131,7 +147,7 @@ def classify_cap(mkt_cap_usd: float | None) -> str:
     return "IPO_SMALL_CAP"
 
 
-# ─── Core analysis ────────────────────────────────────────────────────────────
+# --- Core analysis ------------------------------------------------------------
 def analyse_ticker(
     ticker: str,
     thresholds: dict[str, float],
@@ -142,13 +158,13 @@ def analyse_ticker(
     Downloads D1 data for ticker and checks all three playbook filters.
     Returns a result dict if the stock qualifies, else None.
 
-    Filter 1 — Size of Move:  price ≥ threshold% from last 20MA base touch
-    Filter 2 — Aggressive Structure: candle range acceleration + low pullback count
-    (Filter 3 — Exhaustion Day is checked in backtest.py using intraday data)
+    Filter 1  -  Size of Move:  price >= threshold% from last 20MA base touch
+    Filter 2  -  Aggressive Structure: candle range acceleration + low pullback count
+    (Filter 3  -  Exhaustion Day is checked in backtest.py using intraday data)
     """
     try:
         tk    = yf.Ticker(ticker)
-        hist  = tk.history(period="6mo", interval="1d", auto_adjust=True)
+        hist  = tk.history(period="1y", interval="1d", auto_adjust=True)
 
         if hist is None or len(hist) < MA_PERIOD + ACCEL_PRIOR + ACCEL_RECENT + 5:
             return None
@@ -159,7 +175,7 @@ def analyse_ticker(
         lows   = hist["Low"].values.astype(float)
         n      = len(closes)
 
-        # ── Market cap & cap category ──────────────────────────────────────
+        # -- Market cap & cap category --------------------------------------
         info      = tk.fast_info
         cap_usd   = getattr(info, "market_cap", None)
         cap_b     = cap_usd / 1e9 if cap_usd else None
@@ -169,7 +185,7 @@ def analyse_ticker(
         if category_filter and category != category_filter:
             return None
 
-        # ── Filter 1: Size of move from last 20MA base touch ──────────────
+        # -- Filter 1: Size of move from last 20MA base touch --------------
         ma20 = np.array([
             closes[max(0, i - MA_PERIOD + 1):i + 1].mean()
             if i >= MA_PERIOD - 1 else np.nan
@@ -197,7 +213,7 @@ def analyse_ticker(
 
         bars_since_touch = (n - 1) - touch_idx
 
-        # ── Filter 2: Aggressive structure ────────────────────────────────
+        # -- Filter 2: Aggressive structure --------------------------------
         # 2a. Candle-range acceleration: recent bars significantly larger than prior
         ranges       = highs - lows
         recent_avg   = ranges[-ACCEL_RECENT:].mean()
@@ -222,7 +238,7 @@ def analyse_ticker(
         if require_accel and not filter2_pass:
             return None
 
-        # ── Sector / theme flag ────────────────────────────────────────────
+        # -- Sector / theme flag --------------------------------------------
         sector = ""
         try:
             sector = tk.info.get("sector", "") or ""
@@ -248,7 +264,7 @@ def analyse_ticker(
         return None
 
 
-# ─── Output ────────────────────────────────────────────────────────────────────
+# --- Output --------------------------------------------------------------------
 def print_table(results: list[dict]) -> None:
     if not results:
         print("\nNo qualifying symbols found.")
@@ -262,20 +278,20 @@ def print_table(results: list[dict]) -> None:
     }
 
     labels = {
-        "MARKET_LEADER": f"MARKET LEADERS  (≥50% threshold)  —  expect 10–20% drop",
-        "THEMATIC":      f"THEMATIC / MID-CAP  (≥100%)  —  expect 20–40% drop",
-        "IPO_SMALL_CAP": f"IPO / SMALL-CAP  (≥200%)  —  most aggressive reversals",
+        "MARKET_LEADER": f"MARKET LEADERS  (>=50% threshold)   -   expect 10-20% drop",
+        "THEMATIC":      f"THEMATIC / MID-CAP  (>=100%)   -   expect 20-40% drop",
+        "IPO_SMALL_CAP": f"IPO / SMALL-CAP  (>=200%)   -   most aggressive reversals",
     }
 
     hdr = f"{'#':<4} {'Ticker':<8} {'Cap $B':>8} {'Move%':>8} {'Need':>6} {'Price':>8} {'Base':>8} {'Bars':>5} {'F2':>4} {'Sector'}"
-    sep = "─" * len(hdr)
+    sep = "-" * len(hdr)
 
     for cat, rows in groups.items():
         if not rows:
             continue
-        print(f"\n{'═'*len(hdr)}")
+        print(f"\n{'='*len(hdr)}")
         print(f"  {labels[cat]}  ({len(rows)} found)")
-        print(f"{'═'*len(hdr)}")
+        print(f"{'='*len(hdr)}")
         print(hdr)
         print(sep)
         for i, r in enumerate(rows, 1):
@@ -285,7 +301,7 @@ def print_table(results: list[dict]) -> None:
                 f"{r['move_pct']:>7.1f}% {r['threshold_pct']:>5.0f}% "
                 f"{r['cur_price']:>8.2f} {r['base_price']:>8.2f} "
                 f"{r['bars_since_touch']:>5} "
-                f"{'✓' if r['filter2_pass'] else '✗':>4}  "
+                f"{'Y' if r['filter2_pass'] else 'N':>4}  "
                 f"{r['sector']}"
             )
         print(sep)
@@ -315,7 +331,7 @@ def save_outputs(results: list[dict], out_dir: Path) -> None:
     print(f"Watchlist: {wl_path}")
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────────
+# --- CLI ----------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Parabolic Short Screener")
     p.add_argument("--universe",  default="sp500",
@@ -343,9 +359,9 @@ def main() -> None:
     print(f"Universe : {args.universe.upper()}  ({len(tickers)} symbols)")
     print(f"Category : {args.category or 'ALL'}")
     print(f"Filter 2 : {'OFF' if args.no_accel_filter else 'ON'}")
-    print(f"Thresholds: Leader≥{thresholds['MARKET_LEADER']}%  "
-          f"Thematic≥{thresholds['THEMATIC']}%  "
-          f"Small≥{thresholds['IPO_SMALL_CAP']}%\n")
+    print(f"Thresholds: Leader>={thresholds['MARKET_LEADER']}%  "
+          f"Thematic>={thresholds['THEMATIC']}%  "
+          f"Small>={thresholds['IPO_SMALL_CAP']}%\n")
 
     results: list[dict] = []
 

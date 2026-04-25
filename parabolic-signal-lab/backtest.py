@@ -1,5 +1,5 @@
 """
-Parabolic Short Strategy — Backtester
+Parabolic Short Strategy  -  Backtester
 ======================================
 Uses yfinance 60-min intraday data (up to 730 days) to simulate the full
 playbook on each qualifying setup found by screener.py.
@@ -11,9 +11,9 @@ What it tests:
   Risk mgmt Partial close at TP1, stop to break-even, max 2 attempts/day
 
 Results reported by stock category:
-  MARKET_LEADER   — Large-cap (≥50% move threshold)
-  THEMATIC        — Mid-cap hype/sector runners (≥100%)
-  IPO_SMALL_CAP   — Small-cap / recent IPOs (≥200%)
+  MARKET_LEADER    -  Large-cap (>=50% move threshold)
+  THEMATIC         -  Mid-cap hype/sector runners (>=100%)
+  IPO_SMALL_CAP    -  Small-cap / recent IPOs (>=200%)
 
 Usage:
   # Run screener first, then backtest its output CSV:
@@ -41,7 +41,7 @@ import pandas as pd
 import yfinance as yf
 from tqdm import tqdm
 
-# ─── Config ───────────────────────────────────────────────────────────────────
+# --- Config -------------------------------------------------------------------
 ENTRY_TYPES   = ("VWAP_REJECTION", "VWAP_LOSS", "BREAK_STRUCTURE")
 MA_PERIOD     = 20
 MA_LOOKBACK   = 90
@@ -60,7 +60,7 @@ TP1_CLOSE_PCT = 0.50   # Close 50% at TP1
 MAX_ATTEMPTS  = 2      # Playbook: max 2 attempts per exhaustion window
 
 
-# ─── Data structures ──────────────────────────────────────────────────────────
+# --- Data structures ----------------------------------------------------------
 @dataclass
 class Trade:
     ticker:     str
@@ -86,7 +86,7 @@ class DayResult:
     trades:     list[Trade] = field(default_factory=list)
 
 
-# ─── VWAP ─────────────────────────────────────────────────────────────────────
+# --- VWAP ---------------------------------------------------------------------
 def compute_vwap_series(df_day: pd.DataFrame) -> pd.Series:
     """Compute cumulative intraday VWAP (D1 reset) from H1 bars."""
     tp  = (df_day["High"] + df_day["Low"] + df_day["Close"]) / 3.0
@@ -96,7 +96,7 @@ def compute_vwap_series(df_day: pd.DataFrame) -> pd.Series:
     return cum_pv / cum_vol
 
 
-# ─── Core: analyse one exhaustion day ─────────────────────────────────────────
+# --- Core: analyse one exhaustion day -----------------------------------------
 def simulate_day(
     ticker:     str,
     date:       datetime.date,
@@ -143,14 +143,14 @@ def simulate_day(
     ):
         bar_time = times[i]
 
-        # ── EOD check ──────────────────────────────────────────────────────
+        # -- EOD check ------------------------------------------------------
         is_eod = (hasattr(bar_time, "hour") and
                   (bar_time.hour > EOD_HOUR or
                    (bar_time.hour == EOD_HOUR and bar_time.minute >= EOD_MINUTE)))
 
         if in_trade and is_eod:
-            pnl_pct    = (entry_px - c) / entry_px * 100.0
-            r_multiple = (entry_px - c) / (stop_px - entry_px) if stop_px > entry_px else 0
+            pnl_pct    = float(entry_px - c) / float(entry_px) * 100.0
+            r_multiple = float(entry_px - c) / float(stop_px - entry_px) if stop_px > entry_px else 0.0
             result.trades.append(Trade(
                 ticker=ticker, date=date, category=category,
                 entry_type=entry_type, entry_px=entry_px,
@@ -161,7 +161,7 @@ def simulate_day(
             in_trade = False
             break
 
-        # ── Update VWAP tracking ────────────────────────────────────────────
+        # -- Update VWAP tracking --------------------------------------------
         if c < vw:
             bars_below  += 1
             vwap_crossed = True
@@ -180,11 +180,11 @@ def simulate_day(
             bar_lows[-1]  < bar_lows[-2]
         )
 
-        # ── Manage open position ────────────────────────────────────────────
+        # -- Manage open position --------------------------------------------
         if in_trade:
             # Stop hit
             if h >= stop_px:
-                pnl_pct    = (entry_px - stop_px) / entry_px * 100.0
+                pnl_pct    = float(entry_px - stop_px) / float(entry_px) * 100.0
                 r_multiple = -1.0 if not stop_at_be else 0.0
                 result.trades.append(Trade(
                     ticker=ticker, date=date, category=category,
@@ -207,7 +207,7 @@ def simulate_day(
 
             continue
 
-        # ── Entry signals (only when not in trade, below VWAP, within window) ──
+        # -- Entry signals (only when not in trade, below VWAP, within window) --
         if attempts >= MAX_ATTEMPTS:
             break
         if not vwap_crossed:
@@ -242,7 +242,7 @@ def simulate_day(
         if not triggered:
             continue
 
-        # ── Execute entry ────────────────────────────────────────────────────
+        # -- Execute entry ----------------------------------------------------
         # Stop = day high (D1) + buffer, or most recent intraday high + buffer
         stop_anchor = max(day_high_d1, h)
         entry_price = c
@@ -264,7 +264,7 @@ def simulate_day(
     return result
 
 
-# ─── Backtest a single ticker ──────────────────────────────────────────────────
+# --- Backtest a single ticker --------------------------------------------------
 def backtest_ticker(
     ticker:     str,
     category:   str,
@@ -277,13 +277,13 @@ def backtest_ticker(
     Finds all qualifying parabolic periods and simulates each exhaustion day.
     """
     try:
-        # Daily data — used for setup detection (Filters 1 + 2)
+        # Daily data  -  used for setup detection (Filters 1 + 2)
         hist_d = yf.download(ticker, period="2y", interval="1d",
                               auto_adjust=True, progress=False)
         if hist_d is None or len(hist_d) < MA_PERIOD + 20:
             return []
 
-        # 60-min intraday — used for Filter 3 + entry/exit simulation
+        # 60-min intraday  -  used for Filter 3 + entry/exit simulation
         # yfinance provides up to 730 days of 60-min data
         hist_h = yf.download(ticker, period="730d", interval="60m",
                               auto_adjust=True, progress=False)
@@ -340,7 +340,7 @@ def backtest_ticker(
             if not f2_pass:
                 continue
 
-            # Check the next 1–2 D1 bars for an exhaustion day
+            # Check the next 1-2 D1 bars for an exhaustion day
             bar_date_d = hist_d.index[d_idx].date()
 
             for look_ahead in range(1, 3):  # tomorrow + day after
@@ -379,7 +379,7 @@ def backtest_ticker(
         return []
 
 
-# ─── Reporting ─────────────────────────────────────────────────────────────────
+# --- Reporting -----------------------------------------------------------------
 def report(all_trades: list[Trade], entry_type: str) -> None:
     if not all_trades:
         print("No trades to report.")
@@ -387,10 +387,10 @@ def report(all_trades: list[Trade], entry_type: str) -> None:
 
     df = pd.DataFrame([t.__dict__ for t in all_trades])
 
-    print(f"\n{'═'*65}")
-    print(f"  BACKTEST RESULTS — Entry: {entry_type}")
+    print(f"\n{'='*65}")
+    print(f"  BACKTEST RESULTS  -  Entry: {entry_type}")
     print(f"  Period: {df['date'].min()}  to  {df['date'].max()}")
-    print(f"{'═'*65}")
+    print(f"{'='*65}")
 
     cats = ["MARKET_LEADER", "THEMATIC", "IPO_SMALL_CAP"]
     for cat in cats:
@@ -411,12 +411,12 @@ def report(all_trades: list[Trade], entry_type: str) -> None:
         }[cat]
 
         print(f"\n  {label}")
-        print(f"  {'─'*50}")
+        print(f"  {'-'*50}")
         print(f"  Trades     : {total}")
         print(f"  Win rate   : {wins}/{total}  ({wins/total*100:.1f}%)")
         print(f"  Avg R      : {avg_r:.2f}")
-        print(f"  Avg win R  : {win_r:.2f}" if wins > 0 else "  Avg win R  : —")
-        print(f"  Avg loss R : {loss_r:.2f}" if total - wins > 0 else "  Avg loss R : —")
+        print(f"  Avg win R  : {win_r:.2f}" if wins > 0 else "  Avg win R  :  - ")
+        print(f"  Avg loss R : {loss_r:.2f}" if total - wins > 0 else "  Avg loss R :  - ")
         print(f"  Exit reasons: {exits}")
 
         top5 = grp.nlargest(5, "r_multiple")[["ticker","date","r_multiple","pnl_pct","exit_reason"]]
@@ -426,9 +426,9 @@ def report(all_trades: list[Trade], entry_type: str) -> None:
     # Overall
     wins  = (df["r_multiple"] > 0).sum()
     total = len(df)
-    print(f"\n{'─'*65}")
+    print(f"\n{'-'*65}")
     print(f"  OVERALL  {wins}/{total} wins  ({wins/total*100:.1f}%)  avg R={df['r_multiple'].mean():.2f}")
-    print(f"{'═'*65}")
+    print(f"{'='*65}")
 
 
 def save_trades(trades: list[Trade], out_dir: Path) -> None:
@@ -444,7 +444,7 @@ def save_trades(trades: list[Trade], out_dir: Path) -> None:
     print(f"\nTrades CSV: {path}")
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────────
+# --- CLI ----------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Parabolic Short Backtester")
     p.add_argument("--candidates", help="CSV from screener.py output")
@@ -486,9 +486,9 @@ def main() -> None:
     out_dir     = Path(args.out_dir)
 
     for entry_type in entry_types:
-        print(f"\n{'─'*65}")
+        print(f"\n{'-'*65}")
         print(f"Backtesting {len(candidates)} candidates  entry={entry_type}")
-        print(f"{'─'*65}")
+        print(f"{'-'*65}")
 
         all_trades: list[Trade] = []
         for cand in tqdm(candidates, unit="ticker", ncols=80):

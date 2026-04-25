@@ -1,5 +1,5 @@
 """
-OctagonAI Enrichment Layer — Parabolic Short Strategy
+OctagonAI Enrichment Layer  -  Parabolic Short Strategy
 =======================================================
 Takes the top candidates from screener.py and enriches each one with
 OctagonAI MCP data to answer the key question:
@@ -8,12 +8,12 @@ OctagonAI MCP data to answer the key question:
 
 Hype-driven moves (AI theme, quantum computing, meme, IPO speculation) tend
 to reverse faster and more aggressively than fundamentals-driven runs per the
-playbook ("Stocks driven by hype or strong themes tend to drop 20–40% or more
+playbook ("Stocks driven by hype or strong themes tend to drop 20-40% or more
 in a single day").
 
 HOW OCTAGON ENRICHMENT WORKS
-─────────────────────────────
-OctagonAI runs through Claude Code's MCP protocol — it is NOT called directly
+-----------------------------
+OctagonAI runs through Claude Code's MCP protocol  -  it is NOT called directly
 from Python. Instead, this module generates structured prompts that you paste
 into Claude Code (or run via /financial-analyst-master) to get enrichment.
 
@@ -21,14 +21,14 @@ For automated enrichment, the module also outputs a ready-to-run Claude Code
 command file that invokes /financial-analyst-master for each candidate.
 
 OCTAGON TOOLS USED PER CANDIDATE
-──────────────────────────────────
-  stock-price-change      → Confirm the % move over 1M/3M/6M
-  company-market-cap      → Confirm cap classification + Small/Mid/Large label
-  earnings-call-insights  → Was the run driven by guidance, hype, or theme?
-  earnings-conf-call-sentiment → Management tone (overconfident = bearish signal)
-  sec-8k-analysis         → Recent material events (merger, secondary offering, etc.)
-  sec-risk-factors        → Key risks that could accelerate reversal
-  analyst-estimates       → Consensus vs. current price (stretched = reversal likely)
+----------------------------------
+  stock-price-change      -> Confirm the % move over 1M/3M/6M
+  company-market-cap      -> Confirm cap classification + Small/Mid/Large label
+  earnings-call-insights  -> Was the run driven by guidance, hype, or theme?
+  earnings-conf-call-sentiment -> Management tone (overconfident = bearish signal)
+  sec-8k-analysis         -> Recent material events (merger, secondary offering, etc.)
+  sec-risk-factors        -> Key risks that could accelerate reversal
+  analyst-estimates       -> Consensus vs. current price (stretched = reversal likely)
 
 Usage:
   python enricher.py --candidates output/parabolic_candidates_YYYYMMDD.csv
@@ -42,7 +42,7 @@ import json
 from pathlib import Path
 
 
-# ─── Octagon skill mapping ─────────────────────────────────────────────────────
+# --- Octagon skill mapping -----------------------------------------------------
 # These are the OctagonAI MCP tools most relevant to parabolic short analysis.
 # Ordered by usefulness for this strategy.
 OCTAGON_SKILLS = {
@@ -60,31 +60,31 @@ OCTAGON_SKILLS = {
     "sec-risk-factors": "Extracts and categorises key risks from the latest 10-K/10-Q. "
                          "High leverage + high short interest = faster reversal.",
     "analyst-estimates": "Consensus revenue/EPS estimates vs. current valuation. "
-                          "Price far above consensus → stretched, reversal likely.",
+                          "Price far above consensus -> stretched, reversal likely.",
     "financial-health-scores": "Altman Z-Score (bankruptcy risk) and Piotroski Score. "
                                  "Low scores on a parabolic stock = fragile move.",
 }
 
 CATEGORY_CONTEXT = {
     "MARKET_LEADER": (
-        "MARKET LEADER (Large-cap ≥$10B, ≥50% threshold). "
-        "These stocks usually reverse 10–20%. "
+        "MARKET LEADER (Large-cap >=$10B, >=50% threshold). "
+        "These stocks usually reverse 10-20%. "
         "Focus on whether the move is narrative-driven vs. justified by earnings revision."
     ),
     "THEMATIC": (
-        "THEMATIC MID-CAP ($2–10B, ≥100% threshold). "
+        "THEMATIC MID-CAP ($2-10B, >=100% threshold). "
         "Sector/theme runners (AI, quantum, biotech, EV). "
-        "These reverse 20–40%. Check if the theme catalyst is durable or sentiment-driven."
+        "These reverse 20-40%. Check if the theme catalyst is durable or sentiment-driven."
     ),
     "IPO_SMALL_CAP": (
-        "IPO / SMALL-CAP (<$2B, ≥200% threshold). "
+        "IPO / SMALL-CAP (<$2B, >=200% threshold). "
         "Highest volatility, most aggressive reversals (40%+ in a day possible). "
         "Check float, short interest, and whether the move is purely speculative."
     ),
 }
 
 
-# ─── Enrichment prompt builder ────────────────────────────────────────────────
+# --- Enrichment prompt builder ------------------------------------------------
 def build_enrichment_prompt(candidate: dict) -> str:
     ticker   = candidate["ticker"]
     category = candidate.get("category", "THEMATIC")
@@ -102,20 +102,20 @@ def build_enrichment_prompt(candidate: dict) -> str:
 /financial-analyst-master {ticker} {category.lower().replace('_', '-')}
 
 CONTEXT FOR THIS ANALYSIS
-──────────────────────────
+--------------------------
 Ticker    : {ticker}
 Category  : {category}  ({ctx})
 Market Cap: ${cap_b}B
 Sector    : {sector}
 Move      : +{move_pct}% from last 20MA base touch
-Strategy  : Parabolic Short — looking for exhaustion and reversal
+Strategy  : Parabolic Short  -  looking for exhaustion and reversal
 
 OCTAGON TOOLS TO PRIORITISE (in order)
-────────────────────────────────────────
+----------------------------------------
 {tools_str}
 
 SPECIFIC QUESTIONS TO ANSWER
-──────────────────────────────
+------------------------------
 1. Is the parabolic move driven by durable fundamentals or hype/narrative?
 2. What was the catalyst? Is it still active or has it been priced in?
 3. What is the most recent earnings call sentiment? Any overconfidence?
@@ -135,7 +135,7 @@ def build_claude_command_file(candidates: list[dict], out_path: Path) -> None:
     """
     today = datetime.date.today().strftime("%Y-%m-%d")
     lines = [
-        f"# OctagonAI Enrichment Commands — {today}",
+        f"# OctagonAI Enrichment Commands  -  {today}",
         "",
         "Paste each command into Claude Code to run the OctagonAI enrichment.",
         "Commands are ordered by move % (highest conviction first).",
@@ -167,38 +167,38 @@ def build_claude_command_file(candidates: list[dict], out_path: Path) -> None:
     print(f"Claude commands: {out_path}")
 
 
-# ─── Summary table ─────────────────────────────────────────────────────────────
+# --- Summary table -------------------------------------------------------------
 def print_enrichment_plan(candidates: list[dict]) -> None:
-    print(f"\n{'═'*70}")
+    print(f"\n{'='*70}")
     print("  OCTAGON ENRICHMENT PLAN")
-    print(f"{'═'*70}")
+    print(f"{'='*70}")
     print(f"  {'#':<4} {'Ticker':<8} {'Category':<18} {'Move%':>7} {'Cap $B':>8} {'Sector'}")
-    print(f"  {'─'*64}")
+    print(f"  {'-'*64}")
 
     sorted_cands = sorted(candidates, key=lambda c: -float(c.get("move_pct", 0)))
     for i, c in enumerate(sorted_cands, 1):
-        cap_str = f"${c['mkt_cap_b']:.1f}" if c.get("mkt_cap_b") else "n/a"
+        cap_str = f"${float(c['mkt_cap_b']):.1f}" if c.get("mkt_cap_b") else "n/a"
         print(
             f"  {i:<4} {c['ticker']:<8} {c.get('category','?'):<18} "
             f"{float(c.get('move_pct',0)):>6.1f}% {cap_str:>8}  {c.get('sector','')}"
         )
 
-    print(f"  {'═'*64}")
+    print(f"  {'='*64}")
     print(f"\n  {len(candidates)} candidates queued for OctagonAI enrichment")
     print(f"\n  Octagon tools to run per candidate:")
     for tool, desc in OCTAGON_SKILLS.items():
-        print(f"    • {tool}")
+        print(f"    - {tool}")
     print(f"\n  Run each command with:  /financial-analyst-master <TICKER>")
     print(f"  Or use the generated commands file (see output)")
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────────
+# --- CLI ----------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate OctagonAI enrichment commands")
     p.add_argument("--candidates", help="CSV from screener.py")
     p.add_argument("--tickers",    nargs="+", help="Specific tickers")
     p.add_argument("--top",        type=int, default=20,
-                   help="Enrich top N candidates by move % (default: 20)")
+                   help="Enrich top N candidates by move pct (default: 20)")
     p.add_argument("--out-dir",    default="output")
     return p.parse_args()
 

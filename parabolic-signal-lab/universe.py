@@ -1,12 +1,12 @@
 """
-Universe Builder — Parabolic Short Strategy
+Universe Builder  -  Parabolic Short Strategy
 ============================================
 Fetches all listed stocks from NASDAQ, NYSE, and S&P 500.
 Classifies each stock into one of three categories from the playbook:
 
-  MARKET_LEADER  Large-cap  > $10B   Parabolic threshold: ≥ 50%
-  THEMATIC       Mid-cap   $2–10B    Parabolic threshold: ≥ 100%
-  IPO_SMALL_CAP  Small-cap  < $2B    Parabolic threshold: ≥ 200%
+  MARKET_LEADER  Large-cap  > $10B   Parabolic threshold: >= 50%
+  THEMATIC       Mid-cap   $2-10B    Parabolic threshold: >= 100%
+  IPO_SMALL_CAP  Small-cap  < $2B    Parabolic threshold: >= 200%
 
 Thematic stocks are further tagged by sector to identify hype-driven
 runners (AI/Tech, Biotech, Clean Energy, Quantum) which tend to produce
@@ -39,7 +39,7 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-# ─── Constants ────────────────────────────────────────────────────────────────
+# --- Constants ----------------------------------------------------------------
 CACHE_FILE    = Path(__file__).parent / ".universe_cache.json"
 CACHE_TTL_HRS = 24
 
@@ -62,11 +62,11 @@ THEMATIC_KEYWORDS = [
     "space", "drone", "robotics", "clean energy", "solar", "fusion",
 ]
 
-# NASDAQ FTP — official free symbol directories
+# NASDAQ FTP  -  official free symbol directories
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 OTHER_LISTED_URL  = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 
-# NASDAQ screener API (backup — broader, includes extra metadata)
+# NASDAQ screener API (backup  -  broader, includes extra metadata)
 NASDAQ_API_URL = (
     "https://api.nasdaq.com/api/screener/stocks"
     "?tableonly=true&limit=5000&offset=0&exchange={exchange}"
@@ -75,7 +75,7 @@ NASDAQ_API_URL = (
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 
-# ─── Universe ─────────────────────────────────────────────────────────────────
+# --- Universe -----------------------------------------------------------------
 class Universe:
     """
     Builds and caches the full tradeable stock universe across
@@ -88,13 +88,13 @@ class Universe:
             refresh:       Force re-fetch even if cache is fresh.
             enrich_sample: Number of random stocks to enrich with yfinance
                            market-cap data during a full rebuild (cap data
-                           is expensive — we classify the rest by price proxy).
+                           is expensive  -  we classify the rest by price proxy).
         """
         self._enrich_sample = enrich_sample
         self._stocks: list[dict] = []
         self._load(refresh)
 
-    # ── Public API ─────────────────────────────────────────────────────────────
+    # -- Public API -------------------------------------------------------------
     def get_all(self, min_price: float = 1.0) -> list[str]:
         return [s["ticker"] for s in self._stocks if s.get("price", 0) >= min_price]
 
@@ -105,7 +105,7 @@ class Universe:
         ]
 
     def get_thematic_only(self, min_price: float = 2.0) -> list[str]:
-        """Mid-cap stocks in hot sectors — highest parabolic reversal probability."""
+        """Mid-cap stocks in hot sectors  -  highest parabolic reversal probability."""
         return [
             s["ticker"] for s in self._stocks
             if s.get("is_thematic") and s.get("price", 0) >= min_price
@@ -147,7 +147,7 @@ class Universe:
         ]
         return "\n".join(lines)
 
-    # ── Internal ───────────────────────────────────────────────────────────────
+    # -- Internal ---------------------------------------------------------------
     def _load(self, refresh: bool) -> None:
         if not refresh and self._cache_valid():
             logger.info("Universe: loaded from cache (%s)", CACHE_FILE)
@@ -211,7 +211,7 @@ class Universe:
     def _fetch_listings(self) -> list[dict]:
         stocks: list[dict] = []
 
-        # ── NASDAQ FTP listings (most reliable) ─────────────────────────────
+        # -- NASDAQ FTP listings (most reliable) -----------------------------
         try:
             stocks.extend(self._parse_nasdaq_ftp(NASDAQ_LISTED_URL, "NASDAQ"))
             stocks.extend(self._parse_nasdaq_ftp(OTHER_LISTED_URL,  "NYSE"))
@@ -221,7 +221,7 @@ class Universe:
         except Exception as e:
             logger.warning("NASDAQ FTP failed (%s), falling back to API", e)
 
-        # ── NASDAQ screener API (fallback) ───────────────────────────────────
+        # -- NASDAQ screener API (fallback) -----------------------------------
         for exchange in ("nasdaq", "nyse", "amex"):
             try:
                 stocks.extend(self._fetch_nasdaq_api(exchange))
@@ -292,7 +292,7 @@ class Universe:
         using yfinance market cap and sector data.
         Fetches in batches to avoid rate limiting.
         """
-        # Sample a subset for enrichment — full universe is too large to enrich all at once
+        # Sample a subset for enrichment  -  full universe is too large to enrich all at once
         sample_size = min(self._enrich_sample, len(stocks))
         # Prioritise S&P 500 members first for enrichment
         sp500 = [s for s in stocks if s.get("in_sp500")]
@@ -344,7 +344,7 @@ class Universe:
                     "IPO_SMALL_CAP"
                 )
 
-            # Thematic flag — hot sector AND/OR name contains thematic keywords
+            # Thematic flag  -  hot sector AND/OR name contains thematic keywords
             in_hot_sector = sector in THEMATIC_SECTORS
             has_keyword   = any(kw in name_low for kw in THEMATIC_KEYWORDS)
             s["is_thematic"] = in_hot_sector or has_keyword
@@ -353,7 +353,7 @@ class Universe:
 
 
 def build_universe(refresh: bool = False) -> Universe:
-    """Convenience function — builds and returns the universe."""
+    """Convenience function  -  builds and returns the universe."""
     return Universe(refresh=refresh)
 
 
